@@ -84,6 +84,13 @@ jobs:
           submodules: recursive
           path: TBuild/tdesktop
 
+      - name: Stage patch files before upstream sync
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp "$REPO_DIR/patches/ios_profile_v2.patch" "$RUNNER_TEMP/ios_profile_v2.patch"
+          cp "$REPO_DIR/patches/optimize_prepare_win_release.py" "$RUNNER_TEMP/optimize_prepare_win_release.py"
+
       - name: Sync latest upstream exDesktop and apply iOS Profile V2 patch
         if: ${{ inputs.sync_upstream }}
         shell: bash
@@ -92,7 +99,6 @@ jobs:
         run: |
           set -euo pipefail
           cd "$REPO_DIR"
-          cp patches/ios_profile_v2.patch "$RUNNER_TEMP/ios_profile_v2.patch"
           git config user.name "exDesktop Profile V2 Bot"
           git config user.email "profile-v2@users.noreply.github.com"
           git remote add upstream https://github.com/metawka/exDesktop.git 2>/dev/null || git remote set-url upstream https://github.com/metawka/exDesktop.git
@@ -205,6 +211,11 @@ jobs:
               requests==2.32.3 beautifulsoup4==4.12.3 lxml==5.3.0 pillow==11.0.0 PyYAML==6.0.2 packaging==24.2
           }
 
+      - name: Optimize prepare.py for fast Release-only CI (skip dump_syms ATL & Debug builds)
+        shell: pwsh
+        run: |
+          python (Join-Path $env:RUNNER_TEMP "optimize_prepare_win_release.py") (Join-Path $env:REPO_DIR "Telegram\build\prepare\prepare.py")
+
       - name: Build ThirdParty libraries
         shell: cmd
         timeout-minutes: 280
@@ -220,7 +231,7 @@ jobs:
           find "$LIBRARIES_PATH" '(' '(' ! '(' \
             -name '*.lib' -o -name '*.dll' -o -name '*.a' -o -name '*.exe' \
             -o -name '*.h' -o -name '*.hpp' -o -name '*.inc' -o -name '*.cmake' -o -name '*.pc' \
-            -o -path '*/include/*' -o -path '*/python311/*' -o -path '*/objects-*' \
+            -o -path '*/include/*' -o -path '*/python311/*' -o -path '*/Qt-*/*' -o -path '*/objects-*' \
             -o -path '*/cache_keys/*' -o -path '*/patches/*' -o -path '*/nv-codec-headers/*' \
             -o -path '*/src/wallet_engine/*' \
           ')' -type f ')' -o -empty ')' -delete || true
