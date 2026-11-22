@@ -1841,6 +1841,72 @@ void PartGeneral6(SectionBuilder &builder) {
 			});
 	});
 	AddAbout(builder, tr::lng_extera_show_id_about());
+
+	builder.addSkip();
+	builder.addSubsectionTitle(tr::lng_exd_profile_v2_section());
+	builder.card([&] {
+		AddToggle(
+			builder,
+			u"profile_v2_enabled"_q,
+			tr::lng_exd_profile_v2_enabled(),
+			{ u"ios"_q, u"profile"_q, u"glass"_q, u"v2"_q });
+		AddToggle(
+			builder,
+			u"profile_v2_adaptive_avatar"_q,
+			tr::lng_exd_profile_v2_adaptive_avatar(),
+			{ u"ios"_q, u"profile"_q, u"avatar"_q, u"color"_q });
+		AddChoice(
+			builder,
+			u"profile_v2_glass_style"_q,
+			tr::lng_exd_profile_v2_glass_style,
+			{
+				&tr::lng_exd_profile_v2_glass_crystal,
+				&tr::lng_exd_profile_v2_glass_matte,
+				&tr::lng_exd_profile_v2_glass_classic,
+			},
+			{ u"ios"_q, u"profile"_q, u"glass"_q });
+		AddToggle(
+			builder,
+			u"profile_v2_gift_bubbles"_q,
+			tr::lng_exd_profile_v2_gift_bubbles(),
+			{ u"ios"_q, u"profile"_q, u"gifts"_q, u"bubbles"_q });
+		AddChoice(
+			builder,
+			u"profile_v2_avatar_rim"_q,
+			tr::lng_exd_profile_v2_avatar_rim,
+			{
+				&tr::lng_exd_profile_v2_rim_near,
+				&tr::lng_exd_profile_v2_rim_always,
+				&tr::lng_exd_profile_v2_rim_off,
+			},
+			{ u"ios"_q, u"profile"_q, u"rim"_q, u"glow"_q });
+		AddChoice(
+			builder,
+			u"profile_v2_avatar_rim_color"_q,
+			tr::lng_exd_profile_v2_rim_color,
+			{
+				&tr::lng_exd_profile_v2_rim_color_gift,
+				&tr::lng_exd_profile_v2_rim_color_vivid,
+				&tr::lng_exd_profile_v2_rim_color_white,
+			},
+			{ u"ios"_q, u"profile"_q, u"rim"_q, u"color"_q });
+		AddToggle(
+			builder,
+			u"profile_v2_circular_actions"_q,
+			tr::lng_exd_profile_v2_circular_actions(),
+			{ u"ios"_q, u"profile"_q, u"buttons"_q });
+		AddToggle(
+			builder,
+			u"profile_v2_lowercase_actions"_q,
+			tr::lng_exd_profile_v2_lowercase_actions(),
+			{ u"ios"_q, u"profile"_q, u"buttons"_q });
+		AddToggle(
+			builder,
+			u"profile_v2_music_sync"_q,
+			tr::lng_exd_profile_v2_music_sync(),
+			{ u"ios"_q, u"profile"_q, u"music"_q, u"pulse"_q });
+	});
+	AddAbout(builder, tr::lng_exd_profile_v2_about());
 }
 
 void PartGeneral7(SectionBuilder &builder) {

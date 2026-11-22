@@ -10318,5 +10318,25 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 "lng_extera_videos" = "Videos";
 "lng_extera_auto_pause" = "Auto-Pause";
 "lng_extera_auto_pause_about" = "Pauses media playback when exDesktop is minimized.";
+"lng_exd_profile_v2_section" = "iOS Profile V2";
+"lng_exd_profile_v2_enabled" = "Enable iOS Profile V2";
+"lng_exd_profile_v2_adaptive_avatar" = "Adaptive Avatar Backdrop";
+"lng_exd_profile_v2_glass_style" = "Glass Surface Style";
+"lng_exd_profile_v2_glass_crystal" = "Crystal Glass (iOS)";
+"lng_exd_profile_v2_glass_matte" = "Frosted Matte";
+"lng_exd_profile_v2_glass_classic" = "Soft Glow";
+"lng_exd_profile_v2_gift_bubbles" = "Interactive 3D Gift Bubbles";
+"lng_exd_profile_v2_avatar_rim" = "Avatar Glow Rim";
+"lng_exd_profile_v2_rim_near" = "Near Gift (iOS)";
+"lng_exd_profile_v2_rim_always" = "Always";
+"lng_exd_profile_v2_rim_off" = "Off";
+"lng_exd_profile_v2_rim_color" = "Avatar Rim Color";
+"lng_exd_profile_v2_rim_color_gift" = "Gift Color";
+"lng_exd_profile_v2_rim_color_vivid" = "Vivid Adaptive";
+"lng_exd_profile_v2_rim_color_white" = "Crystal White";
+"lng_exd_profile_v2_circular_actions" = "Circular Glass Action Buttons";
+"lng_exd_profile_v2_lowercase_actions" = "Lowercase Action Labels";
+"lng_exd_profile_v2_music_sync" = "Music Rhythm Pulse";
+"lng_exd_profile_v2_about" = "Brings iOS Telegram Liquid Glass styling to profiles: adaptive avatar backdrop, draggable 3D glass gift bubbles with elastic bounce and avatar proximity glow, circular glass action buttons, and music-synced pulse.";
 
 // Keys finished

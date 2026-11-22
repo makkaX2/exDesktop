@@ -7,7 +7,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "info/profile/info_profile_music_button.h"
 
-
+#include "extera/extera_config.h"
 #include "ui/effects/animation_value.h"
 #include "ui/color_contrast.h"
 #include "ui/painter.h"
@@ -55,10 +55,34 @@ void PaintPillBackground(
 		const QRect &rect,
 		const PillColors &colors) {
 	auto hq = PainterHighQualityEnabler(p);
-	const auto radius = rect.height() / 2.;
+	const auto rF = QRectF(rect);
+	const auto radius = rF.height() / 2.;
 	p.setPen(Qt::NoPen);
 	p.setBrush(colors.fill);
-	p.drawRoundedRect(rect, radius, radius);
+	p.drawRoundedRect(rF, radius, radius);
+	if (Extera::Bool(u"profile_v2_enabled"_q)) {
+		const auto glassStyle = Extera::Int(u"profile_v2_glass_style"_q);
+		if (glassStyle == 0) {
+			auto sheen = QLinearGradient(rF.topLeft(), rF.bottomLeft());
+			sheen.setColorAt(0., QColor(255, 255, 255, 42));
+			sheen.setColorAt(0.55, QColor(255, 255, 255, 0));
+			p.setBrush(sheen);
+			p.drawRoundedRect(rF, radius, radius);
+		}
+		auto rim = QLinearGradient(rF.topLeft(), rF.bottomRight());
+		const auto hiAlpha = (glassStyle == 0) ? 132 : (glassStyle == 1 ? 84 : 52);
+		rim.setColorAt(0., QColor(255, 255, 255, hiAlpha));
+		rim.setColorAt(0.45, QColor(255, 255, 255, 22));
+		rim.setColorAt(1., QColor(255, 255, 255, hiAlpha / 2));
+		const auto penW = style::ConvertFloatScale(1.0);
+		const auto inset = penW * 0.5;
+		p.setBrush(Qt::NoBrush);
+		p.setPen(QPen(QBrush(rim), penW));
+		p.drawRoundedRect(
+			rF.adjusted(inset, inset, -inset, -inset),
+			radius - inset,
+			radius - inset);
+	}
 }
 
 int PillTextBaseline() {
@@ -86,6 +110,12 @@ MusicButton::MusicButton(QWidget *parent)
 	style::PaletteChanged(
 	) | rpl::on_next([=] {
 		refreshColors();
+	}, lifetime());
+	Extera::Config::Instance().changes(
+	) | rpl::filter([](const QString &key) {
+		return key.startsWith(u"profile_v2_"_q);
+	}) | rpl::on_next([=] {
+		update();
 	}, lifetime());
 }
 

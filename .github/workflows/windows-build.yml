@@ -1,0 +1,324 @@
+name: Build Patched exDesktop (Windows x64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      sync_upstream:
+        description: "Pull latest metawka/exDesktop and apply iOS Profile V2 patch before building"
+        type: boolean
+        default: true
+      upstream_ref:
+        description: "Upstream branch or tag (when sync_upstream is enabled, e.g. main or v7.4.4.2b)"
+        type: string
+        default: "main"
+      publish_release:
+        description: "Publish ready ZIP to GitHub Releases"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  win64:
+    name: Windows x64 (iOS Profile V2)
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    env:
+      CLEAR_QT_BUILD_TREE: "1"
+      CARGO_INCREMENTAL: "0"
+      PREPARE_PATH: "Telegram/build/prepare/prepare.py"
+
+    steps:
+      - name: Verify API credentials
+        shell: pwsh
+        env:
+          API_ID: ${{ secrets.TDESKTOP_API_ID }}
+          API_HASH: ${{ secrets.TDESKTOP_API_HASH }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:API_ID) -or [string]::IsNullOrWhiteSpace($env:API_HASH)) {
+            Write-Error "Missing TDESKTOP_API_ID or TDESKTOP_API_HASH repository secrets! Add them in Settings -> Secrets and variables -> Actions (get them at https://my.telegram.org)."
+            exit 1
+          }
+
+      - name: Free disk space on C drive
+        shell: pwsh
+        run: |
+          $before = (Get-PSDrive C).Free / 1GB
+          Get-Service docker -ErrorAction SilentlyContinue | Stop-Service -ErrorAction SilentlyContinue
+          wsl --shutdown 2>$null
+          Remove-Item `
+            "C:\Android\android-sdk", "C:\Program Files\dotnet", "C:\Miniconda", "C:\msys64", `
+            "$env:USERPROFILE\.cargo", "$env:USERPROFILE\.rustup", `
+            "$env:LOCALAPPDATA\Docker", "C:\ProgramData\DockerDesktop", `
+            "C:\Program Files\PostgreSQL", "C:\PostgreSQL", "C:\Program Files\MongoDB", "C:\Program Files\MySQL", `
+            "C:\ghcup", "C:\cabal", "C:\Program Files\LLVM", "C:\vcpkg", `
+            "C:\tools\kotlinc", "C:\tools\php", "C:\tools\Apache24", "C:\tools\nginx-*", `
+            "C:\selenium", "C:\SeleniumWebDrivers", "C:\Program Files\R", "C:\Program Files (x86)\R", "C:\rtools*", `
+            "C:\Program Files\Google\Chrome*", "C:\Program Files (x86)\Google\Chrome*", "C:\Program Files\Mozilla Firefox*", `
+            "C:\ProgramData\Package Cache" `
+            -Recurse -Force -ErrorAction SilentlyContinue
+          Get-ChildItem "C:\ProgramData\Microsoft\VisualStudio\Packages" -Exclude _Instances -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item `
+            "C:\hostedtoolcache\windows\Go*", "C:\hostedtoolcache\windows\Ruby*", `
+            "C:\hostedtoolcache\windows\PyPy*", "C:\hostedtoolcache\windows\Java_*", "C:\hostedtoolcache\windows\NuGet*" `
+            -Recurse -Force -ErrorAction SilentlyContinue
+          Write-Host ("Disk space freed: {0:N1} GB -> {1:N1} GB free" -f $before, ((Get-PSDrive C).Free / 1GB))
+          exit 0
+
+      - name: Prepare short TBuild directory
+        shell: cmd
+        run: |
+          mkdir %userprofile%\TBuild\Libraries\win64
+          mkdir %userprofile%\TBuild\ThirdParty
+          mklink /d %GITHUB_WORKSPACE%\TBuild %userprofile%\TBuild
+          echo TBUILD=%GITHUB_WORKSPACE%\TBuild>>%GITHUB_ENV%
+          echo REPO_DIR=%GITHUB_WORKSPACE%\TBuild\tdesktop>>%GITHUB_ENV%
+          echo LIBRARIES_PATH=%GITHUB_WORKSPACE%\TBuild\Libraries\win64>>%GITHUB_ENV%
+
+      - name: Checkout fork
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          submodules: recursive
+          path: TBuild/tdesktop
+
+      - name: Sync latest upstream exDesktop and apply iOS Profile V2 patch
+        if: ${{ inputs.sync_upstream }}
+        shell: bash
+        env:
+          UPSTREAM_REF: ${{ inputs.upstream_ref }}
+        run: |
+          set -euo pipefail
+          cd "$REPO_DIR"
+          cp patches/ios_profile_v2.patch "$RUNNER_TEMP/ios_profile_v2.patch"
+          git config user.name "exDesktop Profile V2 Bot"
+          git config user.email "profile-v2@users.noreply.github.com"
+          git remote add upstream https://github.com/metawka/exDesktop.git 2>/dev/null || git remote set-url upstream https://github.com/metawka/exDesktop.git
+          git fetch --depth 1 upstream "$UPSTREAM_REF"
+          git checkout --detach FETCH_HEAD
+          git submodule sync --recursive
+          git submodule update --init --recursive --depth 1
+          if git apply --check "$RUNNER_TEMP/ios_profile_v2.patch"; then
+            git apply "$RUNNER_TEMP/ios_profile_v2.patch"
+          else
+            git apply --3way "$RUNNER_TEMP/ios_profile_v2.patch"
+          fi
+          echo "Successfully synced upstream ($UPSTREAM_REF) at $(git rev-parse --short HEAD) and applied iOS Profile V2 patch!"
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11.9"
+          architecture: "x64"
+
+      - name: Configure git, SDK, and cache key
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config --global user.email "builder@exdesktop.local"
+          git config --global user.name "exDesktop Builder"
+          git config --global core.longpaths true
+
+          DOCPATH="$REPO_DIR/docs/building-win.md"
+          SDK="$(grep -m1 "SDK version" "$DOCPATH" | sed -r 's/.*\*\*([0-9.]+)\*\* SDK version.*/\1/' || true)"
+          echo "Detected SDK from docs: ${SDK:-default}"
+          echo "SDK=$SDK" >> "$GITHUB_ENV"
+
+          {
+            sha256sum "$REPO_DIR/$PREPARE_PATH" | awk '{ print $1 }'
+            echo "${SDK:-default}"
+          } > "$RUNNER_TEMP/cache_key.txt"
+          echo "CACHE_KEY=$(sha256sum "$RUNNER_TEMP/cache_key.txt" | awk '{ print $1 }')" >> "$GITHUB_ENV"
+
+      - name: Set up MSVC x64
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Configure NuGet source
+        shell: cmd
+        run: |
+          nuget sources Disable -Name "Microsoft Visual Studio Offline Packages" 2>nul
+          nuget sources Add -Source https://api.nuget.org/v3/index.json 2>nul
+          exit /b 0
+
+      - name: Restore ThirdParty cache
+        id: cache-third-party
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ env.TBUILD }}\ThirdParty
+          key: win64-thirdparty-${{ env.CACHE_KEY }}
+          restore-keys: |
+            win64-thirdparty-${{ env.CACHE_KEY }}-
+            win64-thirdparty-
+
+      - name: Restore Libraries cache
+        id: cache-libs
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ env.LIBRARIES_PATH }}
+          key: win64-libs-rel-${{ env.CACHE_KEY }}
+          restore-keys: |
+            win64-libs-rel-${{ env.CACHE_KEY }}-
+            win64-libs-rel-
+
+      - name: Prepare Python 3.11 SDK and embeddable runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $pyRoot = Join-Path $env:LIBRARIES_PATH "python311"
+          $embedDir = Join-Path $pyRoot "embed"
+          New-Item -ItemType Directory -Force -Path $pyRoot, $embedDir | Out-Null
+
+          if (-not (Test-Path (Join-Path $pyRoot "libs\python311.lib"))) {
+            Copy-Item -Recurse -Force (Join-Path $env:pythonLocation "include") (Join-Path $pyRoot "include")
+            Copy-Item -Recurse -Force (Join-Path $env:pythonLocation "libs") (Join-Path $pyRoot "libs")
+          }
+
+          if (-not (Test-Path (Join-Path $embedDir "python311.dll"))) {
+            $zipPath = Join-Path $env:RUNNER_TEMP "python-3.11.9-embed-amd64.zip"
+            Invoke-WebRequest -Uri "https://www.python.org/ftp/python/3.11.9/python-3.11.9-embed-amd64.zip" -OutFile $zipPath
+            Expand-Archive -Path $zipPath -DestinationPath $embedDir -Force
+            $pth = Join-Path $embedDir "python311._pth"
+            if (Test-Path $pth) {
+              $content = Get-Content $pth
+              $content = $content -replace '^#import site', 'import site'
+              if ($content -notcontains 'site-packages') { $content += 'site-packages' }
+              if ($content -notcontains 'extera') { $content += 'extera' }
+              Set-Content -Path $pth -Value $content -Encoding ascii
+            }
+          }
+
+          $sitePackages = Join-Path $embedDir "site-packages"
+          if (-not (Test-Path (Join-Path $sitePackages "PIL"))) {
+            python -m pip install --disable-pip-version-check --target $sitePackages `
+              requests==2.32.3 beautifulsoup4==4.12.3 lxml==5.3.0 pillow==11.0.0 PyYAML==6.0.2 packaging==24.2
+          }
+
+      - name: Build ThirdParty libraries
+        shell: cmd
+        timeout-minutes: 280
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          call "%REPO_DIR%\Telegram\build\prepare\win.bat" silent
+
+      - name: Prune intermediate build files from Libraries
+        shell: bash
+        run: |
+          find "$LIBRARIES_PATH" '(' '(' ! '(' \
+            -name '*.lib' -o -name '*.dll' -o -name '*.a' -o -name '*.exe' \
+            -o -name '*.h' -o -name '*.hpp' -o -name '*.inc' -o -name '*.cmake' -o -name '*.pc' \
+            -o -path '*/include/*' -o -path '*/python311/*' -o -path '*/objects-*' \
+            -o -path '*/cache_keys/*' -o -path '*/patches/*' -o -path '*/nv-codec-headers/*' \
+            -o -path '*/src/wallet_engine/*' \
+          ')' -type f ')' -o -empty ')' -delete || true
+
+      - name: Save ThirdParty cache
+        if: always() && steps.cache-third-party.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ env.TBUILD }}\ThirdParty
+          key: win64-thirdparty-${{ env.CACHE_KEY }}-${{ github.run_id }}
+
+      - name: Save Libraries cache
+        if: always() && steps.cache-libs.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ env.LIBRARIES_PATH }}
+          key: win64-libs-rel-${{ env.CACHE_KEY }}-${{ github.run_id }}
+
+      - name: Configure exDesktop (Release x64)
+        shell: cmd
+        env:
+          API_ID: ${{ secrets.TDESKTOP_API_ID }}
+          API_HASH: ${{ secrets.TDESKTOP_API_HASH }}
+        run: |
+          cd /d "%REPO_DIR%\Telegram"
+          call configure.bat x64 ^
+            -D TDESKTOP_API_ID=%API_ID% ^
+            -D TDESKTOP_API_HASH=%API_HASH% ^
+            -D CMAKE_CONFIGURATION_TYPES=Release ^
+            -D DESKTOP_APP_DISABLE_AUTOUPDATE=ON ^
+            -D DESKTOP_APP_DISABLE_CRASH_REPORTS=ON
+
+      - name: Build exDesktop (Release x64)
+        shell: cmd
+        run: |
+          cd /d "%REPO_DIR%\out"
+          cmake --build . --config Release --target Telegram --parallel
+
+      - name: Package portable exDesktop ZIP
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $relDir = Join-Path $env:REPO_DIR "out\Release"
+          $pkgDir = Join-Path $env:GITHUB_WORKSPACE "pkg\exDesktop"
+          if (Test-Path $pkgDir) { Remove-Item -Recurse -Force $pkgDir }
+          New-Item -ItemType Directory -Force -Path $pkgDir | Out-Null
+
+          Copy-Item (Join-Path $relDir "Telegram.exe") (Join-Path $pkgDir "exDesktop.exe")
+          foreach ($dir in @("modules", "python")) {
+            $src = Join-Path $relDir $dir
+            if (Test-Path $src) {
+              Copy-Item -Recurse -Force $src (Join-Path $pkgDir $dir)
+            }
+          }
+          $tgwsSrc = Join-Path $env:REPO_DIR "Telegram\SourceFiles\extera\tgws"
+          if (Test-Path $tgwsSrc) {
+            Copy-Item -Recurse -Force $tgwsSrc (Join-Path $pkgDir "python\tgws")
+          }
+          foreach ($dll in Get-ChildItem -Path $relDir -Filter "*.dll" -ErrorAction SilentlyContinue) {
+            Copy-Item $dll.FullName $pkgDir
+          }
+
+          $versionFile = Get-Content (Join-Path $env:REPO_DIR "Telegram\SourceFiles\core\version.h") -Raw
+          $version = if ($versionFile -match 'AppVersionStr\s*=\s*"([^"]+)"') { $Matches[1] } else { "custom" }
+          $zipName = "exDesktop-win64-profile-v2-$version.zip"
+          $zipPath = Join-Path $env:GITHUB_WORKSPACE $zipName
+          Compress-Archive -Path "$pkgDir\*" -DestinationPath $zipPath -Force
+
+          "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "ZIP_NAME=$zipName" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "ZIP_PATH=$zipPath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Get-Item $zipPath
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: exDesktop-win64-profile-v2-${{ env.VERSION }}
+          path: ${{ env.ZIP_PATH }}
+          retention-days: 30
+
+      - name: Publish to GitHub Releases
+        if: ${{ inputs.publish_release }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "profile-v2-v$($env:VERSION)"
+          $title = "exDesktop $($env:VERSION) + iOS Profile V2 (Windows x64)"
+          $notes = @(
+            "Автоматическая сборка **exDesktop $($env:VERSION)** с нативным патчем **iOS Profile V2 (Liquid Glass)**.",
+            "",
+            "### Что включено:",
+            "- Адаптивный фон шапки профиля по цвету аватарки",
+            "- Интерактивные 3D-пузырьки подарков вокруг аватарки (перетаскивание, отскоки, желе-физика)",
+            "- Цветное свечение края аватарки от ближайших подарков",
+            "- Круглые стеклянные кнопки действий и стеклянные карточки/плашки",
+            "- Пульсация в ритм музыки из встроенного плеера",
+            "- Все настройки доступны в **Настройки exDesktop → Основные → iOS Profile V2**",
+            "",
+            "### Как установить:",
+            "Распакуй архив ``$($env:ZIP_NAME)`` и запусти ``exDesktop.exe`` (или замени файлы в папке своего портативного exDesktop, предварительно закрыв клиент)."
+          ) -join "`n"
+
+          $exists = gh release view $tag --repo $env:GITHUB_REPOSITORY 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag $env:ZIP_PATH --repo $env:GITHUB_REPOSITORY --clobber
+            gh release edit $tag --repo $env:GITHUB_REPOSITORY --title $title --notes $notes
+          } else {
+            gh release create $tag $env:ZIP_PATH --repo $env:GITHUB_REPOSITORY --target "${{ github.ref_name }}" --title $title --notes $notes
+          }

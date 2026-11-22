@@ -10,6 +10,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "settings/sections/settings_extera.h"
 
 #include "extera/extera_badges.h"
+#include "extera/extera_config.h"
 #include "extera/extera_plugin_trust.h"
 
 #include "api/api_peer_colors.h"
@@ -17,6 +18,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "api/api_user_privacy.h"
 #include "apiwrap.h"
 #include "base/call_delayed.h"
+#include "base/event_filter.h"
 #include "base/timer_rpl.h"
 #include "base/timer.h"
 #include "base/unixtime.h"
@@ -68,6 +70,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "lottie/lottie_animation.h"
 #include "lottie/lottie_multi_player.h"
 #include "main/main_session.h"
+#include "media/audio/media_audio.h"
+#include "media/player/media_player_instance.h"
 #include "menu/menu_mute.h"
 #include "settings/settings_credits_graphics.h"
 #include "settings/sections/settings_information.h"
@@ -114,7 +118,12 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "styles/style_menu_icons.h"
 
 #include <QtGui/QClipboard>
+#include <QtGui/QConicalGradient>
 #include <QtGui/QGuiApplication>
+#include <QtGui/QMouseEvent>
+
+#include <array>
+#include <cmath>
 
 namespace Info::Profile {
 namespace {
@@ -363,6 +372,167 @@ Ui::RpWidget *SetupTabBarBackground(
 			st::shadowFg);
 	}, inner->lifetime());
 	return inner;
+}
+
+struct AdaptiveProfileColors {
+	QColor center;
+	QColor edge;
+};
+
+[[nodiscard]] AdaptiveProfileColors ExtractAvatarProfileColors(
+		const QImage &image,
+		bool nightMode) {
+	if (image.isNull()) {
+		return {};
+	}
+	const auto small = image.scaled(
+		24,
+		24,
+		Qt::IgnoreAspectRatio,
+		Qt::SmoothTransformation).convertToFormat(QImage::Format_ARGB32);
+	constexpr auto kBuckets = 12;
+	auto bucketWeight = std::array<float64, kBuckets>{};
+	auto bucketR = std::array<float64, kBuckets>{};
+	auto bucketG = std::array<float64, kBuckets>{};
+	auto bucketB = std::array<float64, kBuckets>{};
+	auto totalWeight = 0.;
+	auto totalR = 0.;
+	auto totalG = 0.;
+	auto totalB = 0.;
+
+	const auto w = small.width();
+	const auto h = small.height();
+	const auto cx = (w - 1) * 0.5;
+	const auto cy = (h - 1) * 0.5;
+	const auto invR = 1. / std::max(cx, 1.);
+
+	for (auto y = 0; y != h; ++y) {
+		const auto dy = (y - cy) * invR;
+		for (auto x = 0; x != w; ++x) {
+			const auto dx = (x - cx) * invR;
+			if (dx * dx + dy * dy > 1.02) {
+				continue;
+			}
+			const auto px = small.pixel(x, y);
+			const auto alpha = qAlpha(px);
+			if (alpha < 96) {
+				continue;
+			}
+			const auto color = QColor::fromRgb(px);
+			auto hue = 0.f;
+			auto sat = 0.f;
+			auto val = 0.f;
+			color.getHsvF(&hue, &sat, &val);
+			const auto r = color.redF();
+			const auto g = color.greenF();
+			const auto b = color.blueF();
+			const auto alphaW = alpha / 255.;
+			const auto lumaPref = 1. - std::abs(float64(val) - 0.55) * 0.72;
+			const auto weight = alphaW
+				* (0.14 + float64(sat) * float64(sat) * 2.4)
+				* std::max(lumaPref, 0.15);
+
+			totalWeight += alphaW;
+			totalR += r * alphaW;
+			totalG += g * alphaW;
+			totalB += b * alphaW;
+
+			if (hue >= 0.f && sat >= 0.12f && val >= 0.08f) {
+				const auto idx = std::clamp(
+					int(hue * kBuckets) % kBuckets,
+					0,
+					kBuckets - 1);
+				bucketWeight[idx] += weight;
+				bucketR[idx] += r * weight;
+				bucketG[idx] += g * weight;
+				bucketB[idx] += b * weight;
+			}
+		}
+	}
+
+	auto bestBucket = -1;
+	auto bestScore = 0.;
+	for (auto i = 0; i != kBuckets; ++i) {
+		if (bucketWeight[i] > bestScore) {
+			bestScore = bucketWeight[i];
+			bestBucket = i;
+		}
+	}
+
+	auto base = QColor();
+	if (bestBucket >= 0 && bestScore > 0.25) {
+		base = QColor::fromRgbF(
+			float(bucketR[bestBucket] / bestScore),
+			float(bucketG[bestBucket] / bestScore),
+			float(bucketB[bestBucket] / bestScore));
+	} else if (totalWeight > 0.) {
+		base = QColor::fromRgbF(
+			float(totalR / totalWeight),
+			float(totalG / totalWeight),
+			float(totalB / totalWeight));
+	} else {
+		base = QColor(64, 118, 198);
+	}
+
+	auto bh = 0.f;
+	auto bs = 0.f;
+	auto bl = 0.f;
+	base.getHslF(&bh, &bs, &bl);
+	if (bh < 0.f || bs < 0.08f) {
+		return nightMode
+			? AdaptiveProfileColors{
+				.center = QColor::fromHslF(0.58f, 0.22f, 0.34f),
+				.edge = QColor::fromHslF(0.58f, 0.18f, 0.17f),
+			}
+			: AdaptiveProfileColors{
+				.center = QColor::fromHslF(0.58f, 0.34f, 0.52f),
+				.edge = QColor::fromHslF(0.58f, 0.36f, 0.39f),
+			};
+	}
+
+	if (nightMode) {
+		return {
+			.center = QColor::fromHslF(
+				bh,
+				float(std::clamp(float64(bs) * 1.08, 0.38, 0.78)),
+				float(std::clamp(float64(bl), 0.32, 0.44))),
+			.edge = QColor::fromHslF(
+				bh,
+				float(std::clamp(float64(bs) * 0.88, 0.30, 0.64)),
+				float(std::clamp(float64(bl) * 0.50, 0.15, 0.22))),
+		};
+	}
+	return {
+		.center = QColor::fromHslF(
+			bh,
+			float(std::clamp(float64(bs) * 1.05, 0.44, 0.82)),
+			float(std::clamp(float64(bl), 0.48, 0.58))),
+		.edge = QColor::fromHslF(
+			bh,
+			float(std::clamp(float64(bs) * 0.94, 0.40, 0.74)),
+			float(std::clamp(float64(bl) * 0.80, 0.34, 0.43))),
+	};
+}
+
+[[nodiscard]] QColor MakeVividRimColor(const QColor &base) {
+	if (!base.isValid()) {
+		return QColor(140, 200, 255);
+	}
+	auto h = 0.f;
+	auto s = 0.f;
+	auto l = 0.f;
+	base.getHslF(&h, &s, &l);
+	if (h < 0.f) {
+		return QColor(235, 242, 255);
+	}
+	return QColor::fromHslF(
+		h,
+		float(std::clamp(float64(s) * 1.25, 0.72, 0.96)),
+		float(std::clamp(float64(l) * 1.15, 0.60, 0.74)));
+}
+
+[[nodiscard]] float64 GiftBubbleRadius() {
+	return float64(style::ConvertFloatScale(17.0));
 }
 
 } // namespace
@@ -707,6 +877,36 @@ TopBar::TopBar(
 	if (_forumButton) {
 		_forumButton->show();
 	}
+
+	_v2AnimTimer = std::make_unique<base::Timer>([=] {
+		stepProfileV2Physics();
+	});
+	_v2MusicPlaying = Media::Player::ShowPauseIcon(
+		Media::Player::instance()->getState(AudioMsgId::Type::Song).state);
+	Media::Player::instance()->updatedNotifier(
+	) | rpl::on_next([=](const Media::Player::TrackState &state) {
+		if (state.id.type() != AudioMsgId::Type::Song) {
+			return;
+		}
+		const auto playing = Media::Player::ShowPauseIcon(state.state);
+		if (_v2MusicPlaying != playing) {
+			_v2MusicPlaying = playing;
+			updateProfileV2AnimState();
+		}
+	}, lifetime());
+	Extera::Config::Instance().changes(
+	) | rpl::filter([](const QString &key) {
+		return key.startsWith(u"profile_v2_"_q);
+	}) | rpl::on_next([=] {
+		refreshProfileV2State();
+	}, lifetime());
+	style::PaletteChanged(
+	) | rpl::on_next([=] {
+		_adaptiveAvatarKey = InMemoryKey();
+		_adaptiveCenterColor = QColor();
+		_adaptiveEdgeColor = QColor();
+	}, lifetime());
+	updateProfileV2AnimState();
 }
 
 void TopBar::setupBirthdayEffect() {
@@ -932,11 +1132,20 @@ void TopBar::updateCollectibleStatus() {
 		_badgeSt = nullptr;
 		_verifiedSt = nullptr;
 	}
+	const auto useAdaptive = useAdaptiveAvatarBg()
+		&& _adaptiveCenterColor.isValid()
+		&& _adaptiveEdgeColor.isValid();
+	if (useAdaptive) {
+		_hasGradientBg = true;
+		_solidBg = std::nullopt;
+	}
 	update();
 	adjustColors(collectible
 		? std::optional<QColor>(collectible->edgeColor)
 		: (colorProfile && !colorProfile->bg.empty())
 		? std::optional<QColor>(colorProfile->bg.front())
+		: useAdaptive
+		? std::optional<QColor>(_adaptiveEdgeColor)
 		: std::nullopt);
 }
 
@@ -952,7 +1161,9 @@ void TopBar::finalizeActions(
 	const auto extend = Ui::BoxShadow::ExtendFor(
 		st::infoProfileTopBarActionButtonShadow);
 	shadowRaw->paintRequest() | rpl::on_next([=] {
-		if (!*shadowShown) {
+		if (!*shadowShown
+			|| (Extera::Bool(u"profile_v2_enabled"_q)
+				&& Extera::Bool(u"profile_v2_circular_actions"_q))) {
 			return;
 		}
 		const auto full = st::infoProfileTopBarActionButtonSize;
@@ -2837,16 +3048,25 @@ void TopBar::updateGiftButtonsGeometry(
 	if (width() <= 0) {
 		return;
 	}
-	const auto sz = st::infoProfileTopBarGiftSize;
+	const auto v2Bubbles = profileV2Enabled()
+		&& Extera::Bool(u"profile_v2_gift_bubbles"_q)
+		&& (_source != Source::Preview);
+	const auto sz = v2Bubbles
+		? int(std::ceil(GiftBubbleRadius() * 2.))
+		: st::infoProfileTopBarGiftSize;
 	const auto halfSz = sz / 2.;
 	for (const auto &gift : _pinnedToTopGifts) {
 		if (gift.button) {
-			const auto giftPos = calculateGiftPosition(
-				gift.position,
-				progressCurrent,
-				userpicRect);
+			const auto giftPos = (v2Bubbles && gift.physInited && progressCurrent > 0.25)
+				? gift.physPos
+				: calculateGiftPosition(
+					gift.position,
+					progressCurrent,
+					userpicRect);
 			const auto buttonRect = QRect(
-				QPoint(giftPos.x() - halfSz, giftPos.y() - halfSz),
+				QPoint(
+					int(std::round(giftPos.x() - halfSz)),
+					int(std::round(giftPos.y() - halfSz))),
 				Size(sz));
 			gift.button->setGeometry(buttonRect);
 		}
@@ -2879,7 +3099,22 @@ void TopBar::paintUserpic(QPainter &p, const QRect &geometry) {
 			paused);
 		if (!frame.isNull()) {
 			auto hq = PainterHighQualityEnabler(p);
-			p.drawImage(geometry, frame);
+			const auto musicScale = (profileV2Enabled()
+				&& Extera::Bool(u"profile_v2_music_sync"_q)
+				&& _v2MusicEnergy > 0.005)
+				? (1. + _v2MusicEnergy * 0.042)
+				: 1.;
+			if (musicScale > 1.) {
+				const auto center = QRectF(geometry).center();
+				p.save();
+				p.translate(center);
+				p.scale(musicScale, musicScale);
+				p.translate(-center);
+				p.drawImage(geometry, frame);
+				p.restore();
+			} else {
+				p.drawImage(geometry, frame);
+			}
 			return;
 		}
 	}
@@ -2926,6 +3161,9 @@ void TopBar::paintUserpic(QPainter &p, const QRect &geometry) {
 		_cachedUserpic = std::move(image);
 		_cachedUserpic.setDevicePixelRatio(style::DevicePixelRatio());
 	}
+	if (!_cachedUserpic.isNull() && _adaptiveAvatarKey != _userpicUniqueKey) {
+		extractAdaptiveAvatarColors();
+	}
 	if (_communityEffect) {
 		Ui::PaintCommunityUserpicEffect(
 			p,
@@ -2937,7 +3175,22 @@ void TopBar::paintUserpic(QPainter &p, const QRect &geometry) {
 	}
 	{
 		auto hq = PainterHighQualityEnabler(p);
-		p.drawImage(geometry, _cachedUserpic);
+		const auto musicScale = (profileV2Enabled()
+			&& Extera::Bool(u"profile_v2_music_sync"_q)
+			&& _v2MusicEnergy > 0.005)
+			? (1. + _v2MusicEnergy * 0.042)
+			: 1.;
+		if (musicScale > 1.) {
+			const auto center = QRectF(geometry).center();
+			p.save();
+			p.translate(center);
+			p.scale(musicScale, musicScale);
+			p.translate(-center);
+			p.drawImage(geometry, _cachedUserpic);
+			p.restore();
+		} else {
+			p.drawImage(geometry, _cachedUserpic);
+		}
 	}
 	if (_uploadOverlay && _uploadOverlay->shown()) {
 		_uploadOverlay->paint(p, geometry, {
@@ -2954,6 +3207,8 @@ void TopBar::paintEvent(QPaintEvent *e) {
 	auto p = QPainter(this);
 	const auto geometry = userpicGeometry();
 	const auto clipBounds = e->region().boundingRect();
+	const auto v2 = profileV2Enabled() && (_source != Source::Preview);
+	const auto v2Bubbles = v2 && Extera::Bool(u"profile_v2_gift_bubbles"_q);
 
 	if (_hasGradientBg && _cachedGradient.isNull()) {
 		const auto collectible = effectiveCollectible();
@@ -2976,9 +3231,18 @@ void TopBar::paintEvent(QPaintEvent *e) {
 				colorProfile->bg[0],
 				false,
 				offset);
+		} else if (useAdaptiveAvatarBg()
+			&& _adaptiveCenterColor.isValid()
+			&& _adaptiveEdgeColor.isValid()) {
+			_cachedGradient = Ui::CreateTopBgGradient(
+				QSize(width(), maximumHeight()),
+				_adaptiveCenterColor,
+				_adaptiveEdgeColor,
+				false,
+				offset);
 		}
 	}
-	if (!_hasGradientBg) {
+	if (!_hasGradientBg || _cachedGradient.isNull()) {
 		paintEdges(p, clipBounds);
 	} else {
 		const auto x = (width()
@@ -3003,21 +3267,55 @@ void TopBar::paintEvent(QPaintEvent *e) {
 			p.drawImage(x, y, _cachedGradient);
 		}
 	}
+	if (v2 && !_savedMessages) {
+		paintProfileV2Backdrop(p, clipBounds, geometry);
+	}
+	p.setClipping(false);
 	if (_patternEmoji && _patternEmoji->ready()) {
 		paintAnimatedPattern(p, clipBounds, geometry);
 	}
 
-	if (clipBounds.bottom() >= geometry.top()
+	if (v2Bubbles) {
+		if (!_pinnedToTopGifts.empty()) {
+			paintPinnedToTopGifts(p, clipBounds, geometry);
+		}
+	} else if (clipBounds.bottom() >= geometry.top()
 		&& clipBounds.top() <= geometry.bottom()) {
 		paintPinnedToTopGifts(p, clipBounds, geometry);
 	}
 
-	if (clipBounds.intersects(geometry)) {
+	const auto avatarBounds = v2
+		? geometry.adjusted(-14, -14, 14, 14)
+		: geometry;
+	if (clipBounds.intersects(avatarBounds)) {
 		paintUserpic(p, geometry);
+		if (v2 && !_savedMessages) {
+			paintProfileV2AvatarRim(p, geometry);
+		}
 		paintStoryOutline(p, geometry);
 	}
 
+	if (v2Bubbles && !_pinnedToTopGifts.empty()) {
+		const auto progress = _giftsHiding
+			? _progress.current() * _giftsHiding->value(1.)
+			: (_giftsAppearing
+				? _progress.current() * _giftsAppearing->value(0.)
+				: _progress.current());
+		if (progress > 0.) {
+			for (auto &gift : _pinnedToTopGifts) {
+				if (gift.physDragging) {
+					paintSingleGiftBubble(p, gift, progress, clipBounds, geometry);
+				}
+			}
+			p.setOpacity(1.);
+		}
+	}
+
 	paintTabSubtitle(p);
+
+	if (v2 && _v2AnimTimer && !_v2AnimTimer->isActive()) {
+		updateProfileV2AnimState();
+	}
 }
 
 void TopBar::setupButtons(
@@ -3583,6 +3881,8 @@ void TopBar::setupNewGifts(
 		if (const auto &unique = gift.info.unique) {
 			if (unique->backdrop.centerColor.isValid()
 				&& unique->backdrop.edgeColor.isValid()) {
+				entry.centerColor = unique->backdrop.centerColor;
+				entry.edgeColor = unique->backdrop.edgeColor;
 				entry.bg = Ui::CreateTopBgGradient(
 					Size(st::infoProfileTopBarGiftSize * 2),
 					unique->backdrop.centerColor,
@@ -3590,6 +3890,12 @@ void TopBar::setupNewGifts(
 					false);
 			}
 		}
+		if (!entry.centerColor.isValid()) {
+			entry.centerColor = QColor(255, 206, 92);
+			entry.edgeColor = QColor(186, 126, 36);
+		}
+		entry.orbitPhase = i * 1.0472 + 0.35;
+		entry.orbitSpeed = 0.84 + (i % 3) * 0.16;
 		entry.position = positions[i];
 		entry.button = base::make_unique_q<Ui::AbstractButton>(this);
 		entry.button->setAccessibleName([&] {
@@ -3606,13 +3912,149 @@ void TopBar::setupNewGifts(
 		}());
 		entry.button->show();
 
+		const auto index = int(_pinnedToTopGifts.size());
 		entry.button->setClickedCallback([=, giftData = gift, peer = _peer] {
 			::Settings::ShowSavedStarGiftBox(controller, peer, giftData);
 		});
+		base::install_event_filter(
+			entry.button.get(),
+			[=, giftData = gift, peer = _peer](not_null<QEvent*> e) {
+				if (index < 0 || index >= int(_pinnedToTopGifts.size())) {
+					return base::EventFilterResult::Continue;
+				}
+				auto &item = _pinnedToTopGifts[index];
+				const auto bubblesOn = profileV2Enabled()
+					&& Extera::Bool(u"profile_v2_gift_bubbles"_q)
+					&& (_source != Source::Preview);
+				switch (e->type()) {
+				case QEvent::Enter:
+					item.hovered = true;
+					if (bubblesOn) {
+						updateProfileV2AnimState();
+						update();
+					}
+					return base::EventFilterResult::Continue;
+				case QEvent::Leave:
+					item.hovered = false;
+					if (bubblesOn) {
+						update();
+					}
+					return base::EventFilterResult::Continue;
+				case QEvent::Hide:
+				case QEvent::WindowDeactivate:
+					item.physDragging = false;
+					return base::EventFilterResult::Continue;
+				case QEvent::MouseButtonPress: {
+					if (!bubblesOn || _progress.current() <= 0.35) {
+						return base::EventFilterResult::Continue;
+					}
+					const auto me = static_cast<QMouseEvent*>(e.get());
+					if (me->button() != Qt::LeftButton) {
+						return base::EventFilterResult::Continue;
+					}
+					if (!item.physInited) {
+						item.physPos = calculateGiftPosition(
+							item.position,
+							_progress.current(),
+							userpicGeometry());
+						item.physInited = true;
+					}
+					const auto local = QPointF(mapFromGlobal(QCursor::pos()));
+					item.physDragging = true;
+					item.physMoved = false;
+					item.dragStartLocal = local;
+					item.dragGrabOffset = item.physPos - local;
+					item.physVel = QPointF();
+					item.lastDragTime = crl::now();
+					updateProfileV2AnimState();
+					me->accept();
+					update();
+					return base::EventFilterResult::Cancel;
+				}
+				case QEvent::MouseMove: {
+					if (!item.physDragging) {
+						return base::EventFilterResult::Continue;
+					}
+					if (!(QGuiApplication::mouseButtons() & Qt::LeftButton)) {
+						item.physDragging = false;
+						return base::EventFilterResult::Continue;
+					}
+					const auto me = static_cast<QMouseEvent*>(e.get());
+					const auto local = QPointF(mapFromGlobal(QCursor::pos()));
+					if (!item.physMoved) {
+						const auto moved = std::hypot(
+							local.x() - item.dragStartLocal.x(),
+							local.y() - item.dragStartLocal.y());
+						if (moved > style::ConvertFloatScale(5.0)) {
+							item.physMoved = true;
+						}
+					}
+					const auto r = GiftBubbleRadius();
+					const auto pad = r + style::ConvertFloatScale(4.0);
+					const auto maxX = std::max(pad + 1., float64(width()) - pad);
+					const auto maxY = std::max(pad + 1., float64(height()) - pad);
+					const auto target = QPointF(
+						std::clamp(local.x() + item.dragGrabOffset.x(), pad, maxX),
+						std::clamp(local.y() + item.dragGrabOffset.y(), pad, maxY));
+					const auto now = crl::now();
+					const auto dt = std::max(0.008, (now - item.lastDragTime) / 1000.);
+					const auto rawVel = (target - item.physPos) / dt;
+					item.physVel = item.physVel * 0.45 + rawVel * 0.55;
+					const auto speed = std::hypot(item.physVel.x(), item.physVel.y());
+					constexpr auto kMaxThrowSpeed = 1350.;
+					if (speed > kMaxThrowSpeed) {
+						item.physVel *= (kMaxThrowSpeed / speed);
+					}
+					item.physPos = target;
+					item.lastDragTime = now;
+					if (item.button) {
+						const auto sz = int(std::ceil(r * 2.));
+						const auto halfSz = sz / 2.;
+						item.button->setGeometry(QRect(
+							QPoint(
+								int(std::round(target.x() - halfSz)),
+								int(std::round(target.y() - halfSz))),
+							Size(sz)));
+					}
+					me->accept();
+					update();
+					return base::EventFilterResult::Cancel;
+				}
+				case QEvent::MouseButtonRelease: {
+					if (!item.physDragging) {
+						return base::EventFilterResult::Continue;
+					}
+					const auto me = static_cast<QMouseEvent*>(e.get());
+					const auto wasMoved = item.physMoved;
+					item.physDragging = false;
+					item.physMoved = false;
+					me->accept();
+					if (!wasMoved) {
+						::Settings::ShowSavedStarGiftBox(controller, peer, giftData);
+					} else {
+						updateProfileV2AnimState();
+					}
+					update();
+					return base::EventFilterResult::Cancel;
+				}
+				default:
+					return base::EventFilterResult::Continue;
+				}
+			});
 
 		_pinnedToTopGifts.push_back(std::move(entry));
 	}
+	if (_close) {
+		_close->raise();
+	}
+	if (_topBarButton) {
+		_topBarButton->raise();
+	}
+	if (_back) {
+		_back->raise();
+	}
 	updateGiftButtonsGeometry(_progress.current(), userpicGeometry());
+	updateProfileV2AnimState();
 
 	using namespace ChatHelpers;
 
@@ -3745,8 +4187,21 @@ void TopBar::paintPinnedToTopGifts(
 		: (_giftsAppearing
 			? _progress.current() * _giftsAppearing->value(0.)
 			: _progress.current());
+	if (progress <= 0.) {
+		return;
+	}
+
+	const auto v2Bubbles = profileV2Enabled()
+		&& Extera::Bool(u"profile_v2_gift_bubbles"_q);
 
 	for (auto &gift : _pinnedToTopGifts) {
+		if (v2Bubbles) {
+			if (gift.physDragging) {
+				continue;
+			}
+			paintSingleGiftBubble(p, gift, progress, clip, userpicRect);
+			continue;
+		}
 		if (!gift.animation
 			&& (_lottieSingleLoop ? gift.lastFrame.isNull() : true)) {
 			continue;
@@ -3820,6 +4275,213 @@ void TopBar::paintPinnedToTopGifts(
 		}
 	}
 	p.setOpacity(1.);
+}
+
+void TopBar::paintSingleGiftBubble(
+		QPainter &p,
+		PinnedToTopGiftEntry &gift,
+		float64 progress,
+		const QRect &clip,
+		const QRect &userpicRect) {
+	if (!gift.animation
+		&& (_lottieSingleLoop ? gift.lastFrame.isNull() : true)) {
+		return;
+	}
+
+	auto frameToRender = QImage();
+	if (_lottieSingleLoop && !gift.lastFrame.isNull()) {
+		frameToRender = gift.lastFrame;
+	} else if (gift.animation && gift.animation->ready()) {
+		frameToRender = gift.animation->frame();
+		frameToRender.setDevicePixelRatio(style::DevicePixelRatio());
+		if (_lottiePlayer) {
+			_lottiePlayer->markFrameShown();
+		}
+		if (_lottieSingleLoop && gift.animation->framesCount() > 0) {
+			const auto currentFrame = gift.animation->frameIndex();
+			const auto totalFrames = gift.animation->framesCount();
+			if (currentFrame >= totalFrames - 1) {
+				gift.lastFrame = frameToRender;
+				gift.animation = nullptr;
+
+				auto allDone = true;
+				for (const auto &entry : _pinnedToTopGifts) {
+					if (entry.animation) {
+						allDone = false;
+						break;
+					}
+				}
+				if (allDone) {
+					_lottiePlayer = nullptr;
+				}
+			}
+		}
+	}
+	if (frameToRender.isNull()) {
+		return;
+	}
+
+	const auto homePos = calculateGiftPosition(
+		gift.position,
+		progress,
+		userpicRect);
+	auto pos = homePos;
+	if (gift.physInited) {
+		if (progress >= 0.99 || gift.physDragging) {
+			pos = gift.physPos;
+		} else {
+			pos = QPointF(
+				homePos.x() + (gift.physPos.x() - homePos.x()) * progress,
+				homePos.y() + (gift.physPos.y() - homePos.y()) * progress);
+		}
+	}
+
+	const auto r = GiftBubbleRadius();
+	const auto haloR = r * (gift.physDragging ? 1.88 : 1.60);
+	const auto musicScale = (Extera::Bool(u"profile_v2_music_sync"_q)
+		&& _v2MusicEnergy > 0.005)
+		? (1. + _v2MusicEnergy * 0.065)
+		: 1.;
+	const auto scale = std::clamp(progress, 0., 1.)
+		* gift.hoverScale
+		* (gift.physDragging ? 1.12 : 1.)
+		* musicScale;
+	const auto boundR = haloR * scale * std::max(gift.stretchX, gift.stretchY) + 4.;
+	const auto bounds = QRectF(
+		pos.x() - boundR,
+		pos.y() - boundR,
+		boundR * 2.,
+		boundR * 2.);
+	if (!bounds.intersects(QRectF(clip))) {
+		return;
+	}
+
+	const auto glassStyle = Extera::Int(u"profile_v2_glass_style"_q);
+	const auto cCenter = gift.centerColor.isValid()
+		? gift.centerColor
+		: QColor(255, 206, 92);
+	const auto cEdge = gift.edgeColor.isValid()
+		? gift.edgeColor
+		: cCenter.darker(145);
+
+	p.save();
+	auto hq = PainterHighQualityEnabler(p);
+	p.setOpacity(std::clamp(progress, 0., 1.));
+	p.translate(pos);
+	if (std::abs(gift.stretchX - 1.) > 0.003
+		|| std::abs(gift.stretchY - 1.) > 0.003) {
+		const auto deg = gift.stretchAngle * 180. / M_PI;
+		p.rotate(deg);
+		p.scale(gift.stretchX * scale, gift.stretchY * scale);
+		p.rotate(-deg);
+	} else if (std::abs(scale - 1.) > 0.002) {
+		p.scale(scale, scale);
+	}
+
+	// 1. Soft colored ambient glow halo behind the glass orb.
+	{
+		auto halo = QRadialGradient(QPointF(0., 0.), haloR);
+		const auto peakAlpha = (glassStyle == 2)
+			? 0.50
+			: (gift.physDragging ? 0.44 : 0.34);
+		halo.setColorAt(0., anim::with_alpha(cCenter, peakAlpha));
+		halo.setColorAt(0.54, anim::with_alpha(cCenter, peakAlpha * 0.40));
+		halo.setColorAt(1., anim::with_alpha(cEdge, 0.));
+		p.setPen(Qt::NoPen);
+		p.setBrush(halo);
+		p.drawEllipse(QRectF(-haloR, -haloR, haloR * 2., haloR * 2.));
+	}
+
+	const auto sphereRect = QRectF(-r, -r, r * 2., r * 2.);
+	auto clipPath = QPainterPath();
+	clipPath.addEllipse(sphereRect);
+
+	// 2. 3D glass sphere body fill & internal caustics.
+	p.save();
+	p.setClipPath(clipPath);
+	p.setPen(Qt::NoPen);
+	if (glassStyle == 0) {
+		// Crystal Glass (iOS): refractive core + upper-left gloss + lower-right bounce.
+		auto core = QRadialGradient(
+			QPointF(-r * 0.24, -r * 0.28),
+			r * 1.38);
+		core.setColorAt(0., anim::with_alpha(cCenter.lighter(142), 0.46));
+		core.setColorAt(0.56, anim::with_alpha(cCenter, 0.30));
+		core.setColorAt(1., anim::with_alpha(cEdge, 0.56));
+		p.setBrush(core);
+		p.drawEllipse(sphereRect);
+
+		auto topGloss = QRadialGradient(
+			QPointF(-r * 0.36, -r * 0.44),
+			r * 0.88);
+		topGloss.setColorAt(0., QColor(255, 255, 255, 160));
+		topGloss.setColorAt(0.46, QColor(255, 255, 255, 40));
+		topGloss.setColorAt(1., QColor(255, 255, 255, 0));
+		p.setBrush(topGloss);
+		p.drawEllipse(sphereRect);
+
+		auto bottomBounce = QRadialGradient(
+			QPointF(r * 0.38, r * 0.42),
+			r * 0.72);
+		bottomBounce.setColorAt(0., anim::with_alpha(cCenter.lighter(168), 0.44));
+		bottomBounce.setColorAt(1., anim::with_alpha(cCenter, 0.));
+		p.setBrush(bottomBounce);
+		p.drawEllipse(sphereRect);
+	} else if (glassStyle == 1) {
+		// Frosted Matte: rich translucent satin disc with delicate top sheen.
+		auto matte = QLinearGradient(0., -r, 0., r);
+		matte.setColorAt(0., anim::with_alpha(cCenter.lighter(120), 0.56));
+		matte.setColorAt(1., anim::with_alpha(cEdge, 0.66));
+		p.setBrush(matte);
+		p.drawEllipse(sphereRect);
+
+		auto frost = QLinearGradient(0., -r, 0., 0.);
+		frost.setColorAt(0., QColor(255, 255, 255, 58));
+		frost.setColorAt(1., QColor(255, 255, 255, 0));
+		p.setBrush(frost);
+		p.drawEllipse(sphereRect);
+	} else {
+		// Soft Glow: light translucent glass capsule.
+		p.setBrush(anim::with_alpha(cCenter, 0.24));
+		p.drawEllipse(sphereRect);
+	}
+
+	// 3. Crisp animated gift sticker centered inside the sphere.
+	const auto iconSize = r * 1.34;
+	p.drawImage(
+		QRectF(-iconSize * 0.5, -iconSize * 0.5, iconSize, iconSize),
+		frameToRender);
+
+	// 4. Subtle top-left glass specular highlight catchlight.
+	if (glassStyle == 0) {
+		p.save();
+		p.translate(-r * 0.34, -r * 0.46);
+		p.rotate(-28.);
+		p.setPen(Qt::NoPen);
+		p.setBrush(QColor(255, 255, 255, 88));
+		p.drawEllipse(QRectF(-r * 0.28, -r * 0.13, r * 0.56, r * 0.26));
+		p.restore();
+	}
+	p.restore();
+
+	// 5. Directional Liquid-Glass specular rim stroke.
+	{
+		auto rim = QLinearGradient(-r, -r, r, r);
+		const auto topAlpha = (glassStyle == 0) ? 228 : (glassStyle == 1 ? 155 : 112);
+		const auto midAlpha = (glassStyle == 0) ? 50 : 32;
+		const auto botAlpha = (glassStyle == 0) ? 0.72 : 0.44;
+		rim.setColorAt(0.00, QColor(255, 255, 255, topAlpha));
+		rim.setColorAt(0.34, QColor(255, 255, 255, midAlpha));
+		rim.setColorAt(0.68, QColor(255, 255, 255, 18));
+		rim.setColorAt(1.00, anim::with_alpha(cCenter.lighter(155), botAlpha));
+		const auto penW = style::ConvertFloatScale(glassStyle == 0 ? 1.35 : 1.05);
+		p.setBrush(Qt::NoBrush);
+		p.setPen(QPen(QBrush(rim), penW));
+		const auto inset = penW * 0.5;
+		p.drawEllipse(sphereRect.adjusted(inset, inset, -inset, -inset));
+	}
+
+	p.restore();
 }
 
 void TopBar::setupStoryOutline(const QRect &geometry) {
@@ -4068,6 +4730,544 @@ TopBarActionButtonStyle TopBar::mapActionStyle(
 				: std::make_optional(st::windowShadowFgFallback->c),
 		};
 	}
+}
+
+bool TopBar::profileV2Enabled() const {
+	return Extera::Bool(u"profile_v2_enabled"_q);
+}
+
+bool TopBar::useAdaptiveAvatarBg() const {
+	return profileV2Enabled()
+		&& Extera::Bool(u"profile_v2_adaptive_avatar"_q)
+		&& (_source != Source::Preview)
+		&& !_savedMessages
+		&& !_topic
+		&& !effectiveCollectible()
+		&& !effectiveColorProfile();
+}
+
+void TopBar::refreshProfileV2State() {
+	if (!profileV2Enabled() || !Extera::Bool(u"profile_v2_gift_bubbles"_q)) {
+		for (auto &gift : _pinnedToTopGifts) {
+			gift.physDragging = false;
+			gift.physMoved = false;
+			gift.physInited = false;
+			gift.physVel = QPointF();
+			gift.stretchX = 1.;
+			gift.stretchY = 1.;
+			gift.hoverScale = 1.;
+		}
+	}
+	if (useAdaptiveAvatarBg() && !_cachedUserpic.isNull()
+		&& (!_adaptiveCenterColor.isValid() || _adaptiveAvatarKey != _userpicUniqueKey)) {
+		extractAdaptiveAvatarColors();
+	} else {
+		applyProfileV2AdaptiveColors();
+	}
+	updateGiftButtonsGeometry(_progress.current(), userpicGeometry());
+	updateProfileV2AnimState();
+	if (_actionsShadow) {
+		_actionsShadow->update();
+	}
+	update();
+}
+
+void TopBar::extractAdaptiveAvatarColors() {
+	if (_cachedUserpic.isNull() || _savedMessages || _topic) {
+		return;
+	}
+	_adaptiveAvatarKey = _userpicUniqueKey;
+	const auto extracted = ExtractAvatarProfileColors(
+		_cachedUserpic,
+		Window::Theme::IsNightMode());
+	_adaptiveCenterColor = extracted.center;
+	_adaptiveEdgeColor = extracted.edge;
+	if (!useAdaptiveAvatarBg() || _v2AdaptivePending) {
+		return;
+	}
+	_v2AdaptivePending = true;
+	crl::on_main(this, [=] {
+		_v2AdaptivePending = false;
+		applyProfileV2AdaptiveColors();
+	});
+}
+
+void TopBar::applyProfileV2AdaptiveColors() {
+	const auto collectible = effectiveCollectible();
+	const auto colorProfile = effectiveColorProfile();
+	const auto useAdaptive = useAdaptiveAvatarBg()
+		&& _adaptiveCenterColor.isValid()
+		&& _adaptiveEdgeColor.isValid();
+	_hasGradientBg = (collectible != nullptr)
+		|| (colorProfile && colorProfile->bg.size() > 1)
+		|| useAdaptive;
+	_solidBg = (!useAdaptive && colorProfile && colorProfile->bg.size() == 1)
+		? std::make_optional(colorProfile->bg.front())
+		: std::nullopt;
+	_cachedGradient = QImage();
+	_cachedClipPath = QPainterPath();
+	adjustColors(collectible
+		? std::optional<QColor>(collectible->edgeColor)
+		: (colorProfile && !colorProfile->bg.empty())
+		? std::optional<QColor>(colorProfile->bg.front())
+		: useAdaptive
+		? std::optional<QColor>(_adaptiveEdgeColor)
+		: std::nullopt);
+	updateButtonsColorOverride();
+	update();
+}
+
+void TopBar::updateProfileV2AnimState() {
+	if (!_v2AnimTimer) {
+		return;
+	}
+	const auto v2 = profileV2Enabled()
+		&& (_source != Source::Preview)
+		&& !_savedMessages;
+	const auto bubblesActive = v2
+		&& Extera::Bool(u"profile_v2_gift_bubbles"_q)
+		&& !_pinnedToTopGifts.empty();
+	const auto musicActive = v2
+		&& Extera::Bool(u"profile_v2_music_sync"_q)
+		&& (_v2MusicPlaying || _v2MusicEnergy > 0.005);
+	const auto shouldRun = isVisible()
+		&& !anim::Disabled()
+		&& (_progress.current() > 0.12)
+		&& (bubblesActive || musicActive);
+	if (shouldRun) {
+		if (!_v2AnimTimer->isActive()) {
+			_v2LastTick = crl::now();
+			_v2AnimTimer->callEach(16);
+		}
+	} else {
+		if (_v2AnimTimer->isActive()) {
+			_v2AnimTimer->cancel();
+		}
+		if (!musicActive) {
+			_v2MusicEnergy = 0.;
+		}
+	}
+}
+
+void TopBar::stepProfileV2Physics() {
+	if (!isVisible() || !profileV2Enabled() || anim::Disabled()) {
+		updateProfileV2AnimState();
+		return;
+	}
+	const auto progress = _progress.current();
+	if (progress <= 0.12) {
+		updateProfileV2AnimState();
+		return;
+	}
+
+	const auto now = crl::now();
+	const auto dt = std::clamp((now - _v2LastTick) / 1000., 0.004, 0.045);
+	_v2LastTick = now;
+	_v2Elapsed += dt;
+
+	// Update music rhythm pulse envelope.
+	const auto musicSync = Extera::Bool(u"profile_v2_music_sync"_q);
+	if (musicSync) {
+		_v2MusicPlaying = Media::Player::ShowPauseIcon(
+			Media::Player::instance()->getState(AudioMsgId::Type::Song).state);
+	} else {
+		_v2MusicPlaying = false;
+	}
+	if (_v2MusicPlaying) {
+		_v2MusicPhase += dt * 2. * M_PI * 2.15;
+		const auto s1 = 0.5 + 0.5 * std::sin(_v2MusicPhase);
+		const auto s2 = 0.5 + 0.5 * std::sin(_v2MusicPhase * 2. + 0.65);
+		const auto beat = std::pow(s1, 4.) * 0.72 + std::pow(s2, 3.) * 0.28;
+		_v2MusicEnergy += (beat - _v2MusicEnergy) * (1. - std::exp(-16. * dt));
+	} else if (_v2MusicEnergy > 0.001) {
+		_v2MusicEnergy *= std::exp(-9. * dt);
+		if (_v2MusicEnergy < 0.003) {
+			_v2MusicEnergy = 0.;
+		}
+	}
+
+	// Step 2D liquid gift bubble physics.
+	const auto userpicRect = userpicGeometry();
+	const auto avatarCenter = QRectF(userpicRect).center();
+	const auto avatarR = userpicRect.width() * 0.5;
+	const auto r = GiftBubbleRadius();
+	const auto pad = r + style::ConvertFloatScale(4.0);
+	const auto maxX = std::max(pad + 1., float64(width()) - pad);
+	const auto maxY = std::max(pad + 1., float64(height()) - pad);
+
+	if (Extera::Bool(u"profile_v2_gift_bubbles"_q)
+		&& !_pinnedToTopGifts.empty()
+		&& width() > 0) {
+		for (auto &gift : _pinnedToTopGifts) {
+			const auto baseHome = calculateGiftPosition(
+				gift.position,
+				1.,
+				userpicRect);
+			if (!gift.physInited) {
+				gift.physPos = baseHome;
+				gift.physVel = QPointF();
+				gift.physInited = true;
+			}
+			const auto driftAmp = style::ConvertFloatScale(3.6);
+			const auto t = _v2Elapsed * gift.orbitSpeed + gift.orbitPhase;
+			auto home = QPointF(
+				baseHome.x() + std::sin(t * 1.15) * driftAmp,
+				baseHome.y() + std::cos(t * 0.92 + 0.7) * driftAmp);
+			if (_v2MusicEnergy > 0.005 && musicSync) {
+				const auto dir = baseHome - avatarCenter;
+				const auto len = std::hypot(dir.x(), dir.y());
+				if (len > 1.) {
+					const auto boost = _v2MusicEnergy
+						* style::ConvertFloatScale(5.5);
+					home += (dir / len) * boost;
+				}
+			}
+
+			if (!gift.physDragging) {
+				constexpr auto kSpring = 2.8;
+				gift.physVel += (home - gift.physPos) * (kSpring * dt);
+				gift.physVel *= std::exp(-1.95 * dt);
+				gift.physPos += gift.physVel * dt;
+
+				// Elastic TopBar wall bounce.
+				constexpr auto kWallBounce = 0.78;
+				if (gift.physPos.x() < pad) {
+					gift.physPos.setX(pad);
+					if (gift.physVel.x() < 0.) {
+						gift.physVel.setX(-gift.physVel.x() * kWallBounce);
+					}
+				} else if (gift.physPos.x() > maxX) {
+					gift.physPos.setX(maxX);
+					if (gift.physVel.x() > 0.) {
+						gift.physVel.setX(-gift.physVel.x() * kWallBounce);
+					}
+				}
+				if (gift.physPos.y() < pad) {
+					gift.physPos.setY(pad);
+					if (gift.physVel.y() < 0.) {
+						gift.physVel.setY(-gift.physVel.y() * kWallBounce);
+					}
+				} else if (gift.physPos.y() > maxY) {
+					gift.physPos.setY(maxY);
+					if (gift.physVel.y() > 0.) {
+						gift.physVel.setY(-gift.physVel.y() * kWallBounce);
+					}
+				}
+
+				// Elastic circular avatar collision.
+				const auto minAvatarDist = avatarR
+					+ r
+					+ style::ConvertFloatScale(2.5);
+				const auto delta = gift.physPos - avatarCenter;
+				const auto dist = std::hypot(delta.x(), delta.y());
+				if (dist < minAvatarDist) {
+					const auto nx = (dist > 0.001) ? (delta.x() / dist) : 1.;
+					const auto ny = (dist > 0.001) ? (delta.y() / dist) : 0.;
+					gift.physPos = QPointF(
+						avatarCenter.x() + nx * minAvatarDist,
+						avatarCenter.y() + ny * minAvatarDist);
+					const auto vn = gift.physVel.x() * nx
+						+ gift.physVel.y() * ny;
+					if (vn < 0.) {
+						constexpr auto kAvatarBounce = 0.80;
+						gift.physVel -= QPointF(nx, ny)
+							* ((1. + kAvatarBounce) * vn);
+					}
+				}
+			}
+		}
+
+		// Elastic inter-bubble marble collisions.
+		const auto minPairDist = r * 2. + style::ConvertFloatScale(1.5);
+		const auto count = int(_pinnedToTopGifts.size());
+		for (auto i = 0; i < count; ++i) {
+			for (auto j = i + 1; j < count; ++j) {
+				auto &a = _pinnedToTopGifts[i];
+				auto &b = _pinnedToTopGifts[j];
+				const auto d = b.physPos - a.physPos;
+				const auto dist = std::hypot(d.x(), d.y());
+				if (dist >= minPairDist || dist < 0.001) {
+					continue;
+				}
+				const auto nx = d.x() / dist;
+				const auto ny = d.y() / dist;
+				const auto overlap = minPairDist - dist;
+				if (a.physDragging && !b.physDragging) {
+					b.physPos += QPointF(nx * overlap, ny * overlap);
+					const auto rvn = (b.physVel.x() - a.physVel.x()) * nx
+						+ (b.physVel.y() - a.physVel.y()) * ny;
+					if (rvn < 0.) {
+						b.physVel -= QPointF(nx, ny) * (1.82 * rvn);
+					}
+				} else if (b.physDragging && !a.physDragging) {
+					a.physPos -= QPointF(nx * overlap, ny * overlap);
+					const auto rvn = (b.physVel.x() - a.physVel.x()) * nx
+						+ (b.physVel.y() - a.physVel.y()) * ny;
+					if (rvn < 0.) {
+						a.physVel += QPointF(nx, ny) * (1.82 * rvn);
+					}
+				} else if (!a.physDragging && !b.physDragging) {
+					a.physPos -= QPointF(nx * overlap * 0.5, ny * overlap * 0.5);
+					b.physPos += QPointF(nx * overlap * 0.5, ny * overlap * 0.5);
+					const auto rvn = (b.physVel.x() - a.physVel.x()) * nx
+						+ (b.physVel.y() - a.physVel.y()) * ny;
+					if (rvn < 0.) {
+						const auto imp = 0.91 * rvn;
+						a.physVel += QPointF(nx * imp, ny * imp);
+						b.physVel -= QPointF(nx * imp, ny * imp);
+					}
+				}
+			}
+		}
+
+		// Velocity-driven jelly stretch & button hit-target sync.
+		const auto ease = 1. - std::exp(-18. * dt);
+		const auto hoverEase = 1. - std::exp(-16. * dt);
+		const auto sz = int(std::ceil(r * 2.));
+		const auto halfSz = sz / 2.;
+		for (auto &gift : _pinnedToTopGifts) {
+			const auto speed = std::hypot(gift.physVel.x(), gift.physVel.y());
+			const auto stretchAmt = std::clamp(speed / 920., 0., 0.28);
+			const auto targetSX = 1. + stretchAmt;
+			const auto targetSY = 1. / (1. + stretchAmt * 0.72);
+			gift.stretchX += (targetSX - gift.stretchX) * ease;
+			gift.stretchY += (targetSY - gift.stretchY) * ease;
+			if (speed > 18.) {
+				const auto desiredAngle = std::atan2(
+					gift.physVel.y(),
+					gift.physVel.x());
+				auto diff = desiredAngle - gift.stretchAngle;
+				while (diff > M_PI) {
+					diff -= 2. * M_PI;
+				}
+				while (diff < -M_PI) {
+					diff += 2. * M_PI;
+				}
+				gift.stretchAngle += diff * ease;
+			}
+			const auto targetHover = gift.hovered ? 1.11 : 1.;
+			gift.hoverScale += (targetHover - gift.hoverScale) * hoverEase;
+
+			if (gift.button && !gift.physDragging) {
+				gift.button->setGeometry(QRect(
+					QPoint(
+						int(std::round(gift.physPos.x() - halfSz)),
+						int(std::round(gift.physPos.y() - halfSz))),
+					Size(sz)));
+			}
+		}
+	}
+
+	updateProfileV2AnimState();
+	update();
+}
+
+void TopBar::paintProfileV2Backdrop(
+		QPainter &p,
+		const QRect &clip,
+		const QRect &userpicRect) {
+	const auto progress = _progress.current();
+	if (progress <= 0.01 || width() <= 0 || height() <= 0) {
+		return;
+	}
+	const auto glassStyle = Extera::Int(u"profile_v2_glass_style"_q);
+	const auto collectible = effectiveCollectible();
+	const auto colorProfile = effectiveColorProfile();
+	const auto accent = collectible
+		? collectible->centerColor
+		: (colorProfile && colorProfile->bg.size() > 1)
+		? colorProfile->bg[1]
+		: (colorProfile && !colorProfile->bg.empty())
+		? colorProfile->bg.front()
+		: (_adaptiveCenterColor.isValid()
+			? _adaptiveCenterColor
+			: st::windowBgActive->c);
+
+	p.save();
+	if (clipTouchesRoundedCorners(clip)) {
+		if (_cachedClipPath.isEmpty()) {
+			const auto radius = st::boxRadius;
+			_cachedClipPath.addRoundedRect(
+				rect() + QMargins{ 0, 0, 0, radius + 1 },
+				radius,
+				radius);
+		}
+		p.setClipPath(_cachedClipPath);
+	}
+	auto hq = PainterHighQualityEnabler(p);
+	p.setPen(Qt::NoPen);
+
+	// Soft breathing radial aura centered behind the avatar.
+	const auto center = QRectF(userpicRect).center();
+	const auto auraR = std::max(width() * 0.56, userpicRect.width() * 2.15);
+	const auto auraAlpha = progress
+		* ((glassStyle == 0 ? 0.24 : (glassStyle == 1 ? 0.18 : 0.22))
+			+ _v2MusicEnergy * 0.16);
+	auto aura = QRadialGradient(center, auraR);
+	aura.setColorAt(0., anim::with_alpha(accent.lighter(135), auraAlpha));
+	aura.setColorAt(0.55, anim::with_alpha(accent, auraAlpha * 0.35));
+	aura.setColorAt(1., anim::with_alpha(accent, 0.));
+	p.setBrush(aura);
+	p.fillRect(rect().intersected(clip), aura);
+
+	// Subtle top-edge crystalline highlight sheen in Crystal Glass mode.
+	if (glassStyle == 0) {
+		const auto sheenH = float64(style::ConvertFloatScale(28.0));
+		if (clip.top() <= int(std::ceil(sheenH))) {
+			auto topSheen = QLinearGradient(0., 0., 0., sheenH);
+			topSheen.setColorAt(0., QColor(255, 255, 255, int(26 * progress)));
+			topSheen.setColorAt(1., QColor(255, 255, 255, 0));
+			p.fillRect(QRectF(0., 0., width(), sheenH), topSheen);
+		}
+	}
+
+	// Smooth bottom fade into profile body divider background when using adaptive backdrop.
+	if (useAdaptiveAvatarBg()) {
+		const auto fadeH = std::max(
+			height() * 0.18,
+			float64(style::ConvertFloatScale(28.0)));
+		const auto fadeTop = height() - fadeH;
+		if (clip.bottom() >= int(std::floor(fadeTop))) {
+			auto bottomFade = QLinearGradient(0., fadeTop, 0., height());
+			const auto bodyBg = st::boxDividerBg->c;
+			bottomFade.setColorAt(0., anim::with_alpha(bodyBg, 0.));
+			bottomFade.setColorAt(1., anim::with_alpha(bodyBg, 0.52 * progress));
+			p.fillRect(QRectF(0., fadeTop, width(), fadeH), bottomFade);
+		}
+	}
+
+	p.restore();
+}
+
+void TopBar::paintProfileV2AvatarRim(
+		QPainter &p,
+		const QRect &userpicRect) {
+	const auto rimMode = Extera::Int(u"profile_v2_avatar_rim"_q);
+	if (rimMode == 2) {
+		return;
+	}
+	if (_peer->isForum() || _source == Source::Community || _topicIconView) {
+		return;
+	}
+	const auto progress = _progress.current();
+	if (progress <= 0.15) {
+		return;
+	}
+	const auto rimColorMode = Extera::Int(u"profile_v2_avatar_rim_color"_q);
+	const auto rRect = QRectF(userpicRect);
+	const auto ac = rRect.center();
+	const auto ar = rRect.width() * 0.5;
+	if (ar <= 2.) {
+		return;
+	}
+
+	p.save();
+	auto hq = PainterHighQualityEnabler(p);
+	p.setBrush(Qt::NoBrush);
+
+	// Base subtle crystal-glass rim edge around the avatar lens.
+	{
+		auto baseRim = QLinearGradient(rRect.topLeft(), rRect.bottomRight());
+		baseRim.setColorAt(0., QColor(255, 255, 255, int(85 * progress)));
+		baseRim.setColorAt(0.5, QColor(255, 255, 255, int(22 * progress)));
+		baseRim.setColorAt(1., QColor(255, 255, 255, int(52 * progress)));
+		const auto baseW = style::ConvertFloatScale(1.1);
+		p.setPen(QPen(QBrush(baseRim), baseW));
+		p.drawEllipse(rRect.adjusted(0.5, 0.5, -0.5, -0.5));
+	}
+
+	const auto bubbleR = GiftBubbleRadius();
+	const auto resolveColor = [&](const QColor &source) {
+		if (rimColorMode == 2) {
+			return QColor(255, 255, 255);
+		}
+		if (rimColorMode == 1) {
+			return MakeVividRimColor(source);
+		}
+		return source.isValid() ? source.lighter(132) : QColor(255, 215, 110);
+	};
+
+	if (rimMode == 0 && !_pinnedToTopGifts.empty()) {
+		// Near Gift (iOS): per-gift directional colored light wrapping onto the avatar rim.
+		for (const auto &gift : _pinnedToTopGifts) {
+			const auto gPos = gift.physInited
+				? gift.physPos
+				: calculateGiftPosition(gift.position, progress, userpicRect);
+			const auto dx = gPos.x() - ac.x();
+			const auto dy = gPos.y() - ac.y();
+			const auto dist = std::hypot(dx, dy);
+			if (dist < 1.) {
+				continue;
+			}
+			const auto edgeDist = std::max(0., dist - ar - bubbleR);
+			auto prox = std::clamp(1. - edgeDist / (ar * 1.65), 0.16, 1.);
+			if (gift.physDragging) {
+				prox = std::min(1., prox * 1.35 + 0.18);
+			}
+			if (Extera::Bool(u"profile_v2_music_sync"_q)) {
+				prox = std::min(1., prox + _v2MusicEnergy * 0.25);
+			}
+
+			// QConicalGradient angles increase counter-clockwise from +X (screen Y is down).
+			auto deg = -std::atan2(dy, dx) * 180. / M_PI;
+			while (deg < 0.) {
+				deg += 360.;
+			}
+			while (deg >= 360.) {
+				deg -= 360.;
+			}
+			const auto glowColor = resolveColor(gift.centerColor);
+
+			auto cone = QConicalGradient(ac, deg);
+			cone.setColorAt(0.00, anim::with_alpha(glowColor, 0.92 * prox));
+			cone.setColorAt(0.11, anim::with_alpha(glowColor, 0.42 * prox));
+			cone.setColorAt(0.24, anim::with_alpha(glowColor, 0.));
+			cone.setColorAt(0.76, anim::with_alpha(glowColor, 0.));
+			cone.setColorAt(0.89, anim::with_alpha(glowColor, 0.42 * prox));
+			cone.setColorAt(1.00, anim::with_alpha(glowColor, 0.92 * prox));
+
+			// Soft outer bloom (skip wide outer bloom if story outline owns outer ring).
+			if (!_hasStories) {
+				p.setOpacity(progress * 0.36);
+				const auto bloomW = style::ConvertFloatScale(5.2);
+				p.setPen(QPen(QBrush(cone), bloomW));
+				const auto grow = bloomW * 0.28;
+				p.drawEllipse(rRect.adjusted(-grow, -grow, grow, grow));
+			}
+
+			// Crisp specular edge highlight hugging the avatar perimeter.
+			p.setOpacity(progress * 0.94);
+			const auto rimW = style::ConvertFloatScale(1.85);
+			p.setPen(QPen(QBrush(cone), rimW));
+			p.drawEllipse(rRect.adjusted(0.4, 0.4, -0.4, -0.4));
+		}
+	} else if (rimMode == 1) {
+		// Always: continuous luminous halo around avatar.
+		const auto collectible = effectiveCollectible();
+		const auto colorProfile = effectiveColorProfile();
+		const auto fallback = collectible
+			? collectible->centerColor
+			: (colorProfile && !colorProfile->bg.empty())
+			? colorProfile->bg.back()
+			: (_adaptiveCenterColor.isValid()
+				? _adaptiveCenterColor
+				: st::windowBgActive->c);
+		const auto glowColor = resolveColor(fallback);
+		const auto pulse = 0.72 + _v2MusicEnergy * 0.28;
+		if (!_hasStories) {
+			p.setOpacity(progress * 0.30 * pulse);
+			const auto bloomW = style::ConvertFloatScale(5.0);
+			p.setPen(QPen(glowColor, bloomW));
+			const auto grow = bloomW * 0.25;
+			p.drawEllipse(rRect.adjusted(-grow, -grow, grow, grow));
+		}
+		p.setOpacity(progress * 0.85 * pulse);
+		const auto rimW = style::ConvertFloatScale(1.75);
+		p.setPen(QPen(glowColor, rimW));
+		p.drawEllipse(rRect.adjusted(0.4, 0.4, -0.4, -0.4));
+	}
+
+	p.restore();
 }
 
 } // namespace Info::Profile

@@ -255,6 +255,21 @@ private:
 	[[nodiscard]] auto effectiveCollectible()
 	const -> std::shared_ptr<Data::EmojiStatusCollectible>;
 
+	[[nodiscard]] bool profileV2Enabled() const;
+	[[nodiscard]] bool useAdaptiveAvatarBg() const;
+	void refreshProfileV2State();
+	void applyProfileV2AdaptiveColors();
+	void extractAdaptiveAvatarColors();
+	void updateProfileV2AnimState();
+	void stepProfileV2Physics();
+	void paintProfileV2Backdrop(
+		QPainter &p,
+		const QRect &clip,
+		const QRect &userpicRect);
+	void paintProfileV2AvatarRim(
+		QPainter &p,
+		const QRect &userpicRect);
+
 	const not_null<PeerData*> _peer;
 	Data::ForumTopic *_topic = nullptr;
 	const Key _key;
@@ -379,14 +394,48 @@ private:
 		std::shared_ptr<Data::DocumentMedia> media;
 		QImage bg;
 		QImage lastFrame;
+		QColor centerColor;
+		QColor edgeColor;
+		QPointF physPos;
+		QPointF physVel;
+		QPointF dragStartLocal;
+		QPointF dragGrabOffset;
+		crl::time lastDragTime = 0;
+		float64 orbitPhase = 0.;
+		float64 orbitSpeed = 1.;
+		float64 stretchX = 1.;
+		float64 stretchY = 1.;
+		float64 stretchAngle = 0.;
+		float64 hoverScale = 1.;
+		bool physInited = false;
+		bool physDragging = false;
+		bool physMoved = false;
+		bool hovered = false;
 		int position = 0;
 		base::unique_qptr<Ui::AbstractButton> button;
 	};
+	void paintSingleGiftBubble(
+		QPainter &p,
+		PinnedToTopGiftEntry &gift,
+		float64 progress,
+		const QRect &clip,
+		const QRect &userpicRect);
 	bool _pinnedToTopGiftsFirstTimeShowed = false;
 	std::vector<PinnedToTopGiftEntry> _pinnedToTopGifts;
 	std::unique_ptr<Ui::Animations::Simple> _giftsAppearing;
 	std::unique_ptr<Ui::Animations::Simple> _giftsHiding;
 	rpl::lifetime _giftsLoadingLifetime;
+
+	std::unique_ptr<base::Timer> _v2AnimTimer;
+	InMemoryKey _adaptiveAvatarKey;
+	QColor _adaptiveCenterColor;
+	QColor _adaptiveEdgeColor;
+	crl::time _v2LastTick = 0;
+	float64 _v2Elapsed = 0.;
+	float64 _v2MusicPhase = 0.;
+	float64 _v2MusicEnergy = 0.;
+	bool _v2MusicPlaying = false;
+	bool _v2AdaptivePending = false;
 
 	QBrush _storyOutlineBrush;
 	std::vector<Ui::OutlineSegment> _storySegments;

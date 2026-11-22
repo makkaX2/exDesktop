@@ -430,6 +430,12 @@ ProfileMusicCard::ProfileMusicCard(
 	) | rpl::on_next([=] {
 		update();
 	}, lifetime());
+	Extera::Config::Instance().changes(
+	) | rpl::filter([](const QString &key) {
+		return key.startsWith(u"profile_v2_"_q);
+	}) | rpl::on_next([=] {
+		update();
+	}, lifetime());
 }
 
 void ProfileMusicCard::setDocument(DocumentData *document) {
@@ -645,6 +651,32 @@ void ProfileMusicCard::paintEvent(QPaintEvent *e) {
 			textLeft,
 			top + artistMetrics.ascent(),
 			artistMetrics.elidedText(_performer, Qt::ElideRight, textWidth));
+	}
+
+	if (Extera::Bool(u"profile_v2_enabled"_q)) {
+		const auto glassStyle = Extera::Int(u"profile_v2_glass_style"_q);
+		if (glassStyle == 0) {
+			auto topGloss = QLinearGradient(0., 0., 0., height() * 0.48);
+			topGloss.setColorAt(0., QColor(255, 255, 255, 30));
+			topGloss.setColorAt(1., QColor(255, 255, 255, 0));
+			p.setPen(Qt::NoPen);
+			p.setBrush(topGloss);
+			p.drawRoundedRect(full, radius, radius);
+		}
+		auto rim = QLinearGradient(full.topLeft(), full.bottomRight());
+		const auto hiAlpha = (glassStyle == 0) ? 105 : (glassStyle == 1 ? 68 : 48);
+		rim.setColorAt(0., QColor(255, 255, 255, hiAlpha));
+		rim.setColorAt(0.42, QColor(255, 255, 255, 20));
+		rim.setColorAt(1., QColor(255, 255, 255, hiAlpha / 2));
+		const auto penW = style::ConvertFloatScale(1.1);
+		p.setClipping(false);
+		p.setBrush(Qt::NoBrush);
+		p.setPen(QPen(QBrush(rim), penW));
+		const auto inset = penW * 0.5;
+		p.drawRoundedRect(
+			full.adjusted(inset, inset, -inset, -inset),
+			radius - inset,
+			radius - inset);
 	}
 }
 
