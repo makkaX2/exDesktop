@@ -63,8 +63,8 @@ def optimize(text: str) -> str:
         '    cmake --install .\n'
     )
     new_qt_build = (
-        '    cmake --build . --config Release\n'
-        '    cmake --install . --config Release\n'
+        '    cmake --build .\n'
+        '    cmake --install .\n'
     )
     assert old_qt_build in text, 'qt_6 build block not found'
     text = text.replace(old_qt_build, new_qt_build, 1)
